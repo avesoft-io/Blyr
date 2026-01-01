@@ -83,7 +83,10 @@ class PageController extends Controller
         $page = Page::findOrFail($id);
         // Load variable configuration from config file
         $variableConfig = config('page-builder', []);
-        return view('pages.builder', compact('page', 'variable_config'));
+        return view('pages.builder', [
+            'page' => $page,
+            'variable_config' => $variableConfig
+        ]);
     }
 
     /**
