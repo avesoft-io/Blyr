@@ -26,6 +26,10 @@ class PageBuilder {
         
         // Flag to prevent duplicate drop handling
         this.isProcessingDrop = false;
+        
+        // Track dragging state for reordering
+        this.draggedElementIndex = null;
+        this.dragOverElementIndex = null;
 
         this.init();
     }
@@ -64,6 +68,17 @@ class PageBuilder {
         });
 
         this.dropZone.addEventListener('dragover', (e) => {
+            // Don't handle dragover if we're reordering an existing element
+            // (let the element's own dragover handler handle it)
+            if (this.draggedElementIndex !== null) {
+                // Check if we're over a builder element
+                const builderElement = e.target.closest('.builder-element');
+                if (builderElement) {
+                    // Let the element handle it
+                    return;
+                }
+            }
+            
             // Don't handle dragover if we're over a column
             if (e.target.closest('.column-content') || e.target.closest('.layout-column')) {
                 return; // Let the column handle it
@@ -139,6 +154,37 @@ class PageBuilder {
             e.stopPropagation(); // Prevent event from bubbling to other handlers
             this.dropZone.classList.remove('drag-over');
             
+            // Check if we're reordering an existing element
+            const draggedIndex = e.dataTransfer.getData('application/x-element-index');
+            if (draggedIndex !== '' && this.draggedElementIndex !== null) {
+                // This is a reorder operation - check if we're dropping on an element or empty space
+                const targetElement = e.target.closest('.builder-element');
+                
+                // If dropping on an element, let that element's handler deal with it
+                if (targetElement && targetElement !== this.dropZone.querySelector(`[data-index="${this.draggedElementIndex}"]`)) {
+                    return; // Let the element's drop handler process it
+                }
+                
+                // Otherwise, dropping on empty space - calculate position
+                const sourceIndex = parseInt(draggedIndex);
+                if (!isNaN(sourceIndex) && sourceIndex >= 0 && sourceIndex < this.elements.length) {
+                    // Calculate new position
+                    const newIndex = this.calculateInsertIndex(e, sourceIndex);
+                    
+                    // Only reorder if position changed
+                    if (newIndex !== sourceIndex) {
+                        this.reorderElement(sourceIndex, newIndex);
+                    }
+                    
+                    // Clean up drag state
+                    this.draggedElementIndex = null;
+                    this.dragOverElementIndex = null;
+                    this.clearDragOverStyles();
+                }
+                return;
+            }
+            
+            // Otherwise, this is a new element from the sidebar
             const componentType = e.dataTransfer.getData('text/plain');
             if (componentType) {
                 // Guard: Check if we're already processing this drop to prevent duplicates
@@ -169,15 +215,27 @@ class PageBuilder {
     /**
      * Calculate the insertion index based on drop position
      * @param {DragEvent} e - The drop event
+     * @param {number} excludeIndex - Optional index to exclude from calculation (for reordering)
      * @returns {number} - The index where the element should be inserted
      */
-    calculateInsertIndex(e) {
+    calculateInsertIndex(e, excludeIndex = null) {
         const dropY = e.clientY;
-        const existingElements = Array.from(this.dropZone.querySelectorAll('.builder-element'));
+        const existingElements = Array.from(this.dropZone.querySelectorAll('.builder-element'))
+            .filter(el => {
+                const elIndex = parseInt(el.dataset.index);
+                // Exclude the dragged element if reordering
+                if (excludeIndex !== null && elIndex === excludeIndex) {
+                    return false;
+                }
+                return !isNaN(elIndex) && elIndex >= 0;
+            })
+            .sort((a, b) => {
+                return parseInt(a.dataset.index) - parseInt(b.dataset.index);
+            });
         
-        // If no elements exist, insert at the beginning
+        // If no elements exist (or only the dragged element), insert at the beginning
         if (existingElements.length === 0) {
-            return 0;
+            return excludeIndex !== null ? Math.min(excludeIndex, 0) : 0;
         }
         
         // Find which element the drop point is above or below
@@ -190,7 +248,12 @@ class PageBuilder {
             
             // If drop is above the middle of this element, insert before it
             if (dropY < elementMiddle) {
-                return i;
+                const targetIndex = parseInt(element.dataset.index);
+                // Adjust index if we're moving an element down
+                if (excludeIndex !== null && excludeIndex < targetIndex) {
+                    return targetIndex;
+                }
+                return targetIndex;
             }
             
             // If drop is below this element's bottom, continue to next element
@@ -198,7 +261,12 @@ class PageBuilder {
             if (dropY > elementBottom) {
                 // Check if this is the last element
                 if (i === existingElements.length - 1) {
-                    return existingElements.length;
+                    const lastIndex = parseInt(existingElements[i].dataset.index);
+                    // Adjust index if we're moving an element up
+                    if (excludeIndex !== null && excludeIndex > lastIndex) {
+                        return lastIndex + 1;
+                    }
+                    return lastIndex + 1;
                 }
                 // Otherwise, continue checking next element
                 continue;
@@ -206,7 +274,11 @@ class PageBuilder {
         }
         
         // If we get here, drop is below all elements
-        return existingElements.length;
+        const lastIndex = parseInt(existingElements[existingElements.length - 1].dataset.index);
+        if (excludeIndex !== null && excludeIndex > lastIndex) {
+            return lastIndex + 1;
+        }
+        return lastIndex + 1;
     }
 
     addElement(type, insertIndex = null) {
@@ -230,6 +302,279 @@ class PageBuilder {
             this.renderElement(element, this.elements.length - 1);
             this.selectElement(this.elements.length - 1);
         }
+    }
+    
+    /**
+     * Setup delayed hover to show drag handle after 3 seconds
+     * @param {HTMLElement} elementDiv - The element div
+     */
+    setupDelayedDragHandle(elementDiv) {
+        const dragHandle = elementDiv.querySelector('.drag-handle');
+        if (!dragHandle) return;
+        
+        let hoverTimeout = null;
+        let isDragging = false;
+        
+        // Clear timeout helper
+        const clearHoverTimeout = () => {
+            if (hoverTimeout) {
+                clearTimeout(hoverTimeout);
+                hoverTimeout = null;
+            }
+        };
+        
+        // Show drag handle after 3 seconds of hovering
+        elementDiv.addEventListener('mouseenter', (e) => {
+            // Don't show if user is typing in a contenteditable element
+            const editable = elementDiv.querySelector('[contenteditable="true"]');
+            if (editable && document.activeElement === editable) {
+                return; // User is typing, don't show drag handle
+            }
+            
+            // Don't show if already dragging
+            if (isDragging) {
+                return;
+            }
+            
+            hoverTimeout = setTimeout(() => {
+                if (!isDragging) {
+                    dragHandle.style.opacity = '1';
+                }
+            }, 3000); // 3 seconds delay
+        });
+        
+        // Hide drag handle when mouse leaves
+        elementDiv.addEventListener('mouseleave', (e) => {
+            clearHoverTimeout();
+            // Only hide if not currently dragging
+            if (!isDragging) {
+                dragHandle.style.opacity = '0';
+            }
+        });
+        
+        // Hide drag handle when user starts typing or clicks to edit
+        const editable = elementDiv.querySelector('[contenteditable="true"]');
+        if (editable) {
+            editable.addEventListener('focus', () => {
+                clearHoverTimeout();
+                dragHandle.style.opacity = '0';
+            });
+            
+            editable.addEventListener('click', () => {
+                clearHoverTimeout();
+                dragHandle.style.opacity = '0';
+            });
+        }
+        
+        // Cancel timeout if user clicks anywhere on the element (except drag handle)
+        elementDiv.addEventListener('click', (e) => {
+            if (!e.target.closest('.drag-handle')) {
+                clearHoverTimeout();
+                dragHandle.style.opacity = '0';
+            }
+        });
+        
+        // Track dragging state
+        elementDiv.addEventListener('dragstart', () => {
+            isDragging = true;
+            clearHoverTimeout();
+            dragHandle.style.opacity = '1'; // Keep visible while dragging
+        });
+        
+        elementDiv.addEventListener('dragend', () => {
+            isDragging = false;
+            dragHandle.style.opacity = '0';
+        });
+    }
+    
+    /**
+     * Setup drag handlers for an element to enable reordering
+     * @param {HTMLElement} elementDiv - The element div
+     * @param {number} index - The element index
+     */
+    setupElementDragHandlers(elementDiv, index) {
+        // Only allow dragging from the drag handle
+        const dragHandle = elementDiv.querySelector('.drag-handle');
+        if (!dragHandle) return;
+        
+        // Track if drag was initiated from handle
+        let dragInitiated = false;
+        
+        // Make the drag handle trigger dragging
+        dragHandle.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+            dragInitiated = true;
+            elementDiv.draggable = true;
+        });
+        
+        // Prevent dragging if not from handle
+        elementDiv.addEventListener('mousedown', (e) => {
+            if (!e.target.closest('.drag-handle')) {
+                dragInitiated = false;
+                elementDiv.draggable = false;
+            }
+        });
+        
+        elementDiv.addEventListener('dragstart', (e) => {
+            // Only allow drag if initiated from drag handle
+            if (!dragInitiated) {
+                e.preventDefault();
+                return false;
+            }
+            
+            this.draggedElementIndex = index;
+            elementDiv.classList.add('dragging');
+            
+            // Set data transfer
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('application/x-element-index', index.toString());
+            
+            // Create a semi-transparent clone for visual feedback
+            const clone = elementDiv.cloneNode(true);
+            clone.style.opacity = '0.5';
+            clone.style.position = 'absolute';
+            clone.style.pointerEvents = 'none';
+            clone.style.top = '-1000px';
+            document.body.appendChild(clone);
+            e.dataTransfer.setDragImage(clone, 0, 0);
+            setTimeout(() => document.body.removeChild(clone), 0);
+        });
+        
+        elementDiv.addEventListener('dragend', (e) => {
+            elementDiv.classList.remove('dragging');
+            elementDiv.draggable = false;
+            dragInitiated = false;
+            this.draggedElementIndex = null;
+            this.dragOverElementIndex = null;
+            this.clearDragOverStyles();
+        });
+        
+        // Handle dragover on other elements to show drop indicator
+        elementDiv.addEventListener('dragover', (e) => {
+            if (this.draggedElementIndex === null || this.draggedElementIndex === index) {
+                return;
+            }
+            
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            
+            const rect = elementDiv.getBoundingClientRect();
+            const dropY = e.clientY;
+            const elementMiddle = rect.top + (rect.height / 2);
+            
+            // Show visual indicator
+            if (dropY < elementMiddle) {
+                // Drop above
+                elementDiv.classList.add('drag-over-top');
+                elementDiv.classList.remove('drag-over-bottom');
+            } else {
+                // Drop below
+                elementDiv.classList.add('drag-over-bottom');
+                elementDiv.classList.remove('drag-over-top');
+            }
+            
+            this.dragOverElementIndex = index;
+        });
+        
+        elementDiv.addEventListener('dragleave', (e) => {
+            // Only remove styles if we're actually leaving the element
+            const rect = elementDiv.getBoundingClientRect();
+            const x = e.clientX;
+            const y = e.clientY;
+            
+            if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+                elementDiv.classList.remove('drag-over-top', 'drag-over-bottom');
+                if (this.dragOverElementIndex === index) {
+                    this.dragOverElementIndex = null;
+                }
+            }
+        });
+        
+        elementDiv.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const draggedIndex = parseInt(e.dataTransfer.getData('application/x-element-index'));
+            if (!isNaN(draggedIndex) && draggedIndex !== index && this.draggedElementIndex !== null) {
+                const dropY = e.clientY;
+                const rect = elementDiv.getBoundingClientRect();
+                const elementMiddle = rect.top + (rect.height / 2);
+                
+                let newIndex;
+                if (dropY < elementMiddle) {
+                    // Drop above
+                    newIndex = index;
+                } else {
+                    // Drop below
+                    newIndex = index + 1;
+                }
+                
+                // Adjust for the element being removed from its original position
+                if (draggedIndex < newIndex) {
+                    newIndex--;
+                }
+                
+                this.reorderElement(draggedIndex, newIndex);
+                
+                // Clean up drag state
+                this.draggedElementIndex = null;
+                this.dragOverElementIndex = null;
+            }
+            
+            elementDiv.classList.remove('drag-over-top', 'drag-over-bottom');
+        });
+    }
+    
+    /**
+     * Reorder an element from one index to another
+     * @param {number} fromIndex - Source index
+     * @param {number} toIndex - Target index
+     */
+    reorderElement(fromIndex, toIndex) {
+        if (fromIndex === toIndex || 
+            fromIndex < 0 || fromIndex >= this.elements.length ||
+            toIndex < 0 || toIndex > this.elements.length) {
+            return;
+        }
+        
+        // Remove element from old position
+        const [element] = this.elements.splice(fromIndex, 1);
+        
+        // Adjust toIndex if we removed an element before the target
+        const adjustedToIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
+        
+        // Insert at new position
+        this.elements.splice(adjustedToIndex, 0, element);
+        
+        // Update selected element index if needed
+        if (this.selectedElementIndex === fromIndex) {
+            this.selectedElementIndex = adjustedToIndex;
+        } else if (this.selectedElementIndex !== null) {
+            // Adjust selected index if it was affected by the move
+            if (fromIndex < this.selectedElementIndex && adjustedToIndex >= this.selectedElementIndex) {
+                this.selectedElementIndex--;
+            } else if (fromIndex > this.selectedElementIndex && adjustedToIndex <= this.selectedElementIndex) {
+                this.selectedElementIndex++;
+            }
+        }
+        
+        // Re-render all elements to update indices
+        this.reRenderAllElements();
+        
+        // Reselect the moved element
+        if (this.selectedElementIndex !== null) {
+            this.selectElement(this.selectedElementIndex);
+        }
+    }
+    
+    /**
+     * Clear all drag-over styles from elements
+     */
+    clearDragOverStyles() {
+        const elements = this.dropZone.querySelectorAll('.builder-element');
+        elements.forEach(el => {
+            el.classList.remove('drag-over-top', 'drag-over-bottom');
+        });
     }
     
     /**
@@ -618,7 +963,19 @@ class PageBuilder {
             `;
         }
 
-        elementDiv.innerHTML = content + '<button class="absolute top-1 right-1 bg-red-500 hover:bg-red-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-xs delete-element shadow-lg" style="z-index: 10; font-size: 14px; line-height: 1;" title="Delete">×</button>';
+        // Add drag handle icon (top-left corner, visible after 3s hover) and delete button (right side)
+        const dragHandle = '<div class="absolute left-1 top-1 cursor-move drag-handle text-gray-300 hover:text-gray-600 transition-all opacity-0 bg-white rounded p-1 shadow-sm" style="z-index: 10;" title="Drag to reorder">' +
+            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">' +
+            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8h16M4 16h16"></path>' +
+            '</svg></div>';
+        elementDiv.innerHTML = dragHandle + content + '<button class="absolute top-1 right-1 bg-red-500 hover:bg-red-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-xs delete-element shadow-lg" style="z-index: 10; font-size: 14px; line-height: 1;" title="Delete">×</button>';
+        
+        // Setup delayed hover to show drag handle after 3 seconds
+        this.setupDelayedDragHandle(elementDiv);
+        
+        // Element will be made draggable only when drag handle is clicked
+        elementDiv.draggable = false;
+        elementDiv.classList.add('draggable-element');
         
         // Remove placeholder if exists
         const placeholder = this.dropZone.querySelector('.flex.flex-col.items-center.justify-center');
@@ -656,10 +1013,15 @@ class PageBuilder {
 
         // Add click handler to select element
         elementDiv.addEventListener('click', (e) => {
-            if (!e.target.classList.contains('delete-element') && !e.target.closest('.nested-element')) {
+            if (!e.target.classList.contains('delete-element') && 
+                !e.target.closest('.nested-element') && 
+                !e.target.closest('.drag-handle')) {
                 this.selectElement(index);
             }
         });
+        
+        // Setup drag handlers for reordering
+        this.setupElementDragHandlers(elementDiv, index);
 
         // Add delete functionality
         const deleteBtn = elementDiv.querySelector('.delete-element');

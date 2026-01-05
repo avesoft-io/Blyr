@@ -79,6 +79,33 @@
         background: white;
         box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
     }
+    .builder-element.dragging {
+        opacity: 0.5;
+        cursor: grabbing;
+    }
+    .builder-element.drag-over-top {
+        border-top: 3px solid #3b82f6;
+        margin-top: 8px;
+    }
+    .builder-element.drag-over-bottom {
+        border-bottom: 3px solid #3b82f6;
+        margin-bottom: 8px;
+    }
+    .builder-element .drag-handle {
+        cursor: grab;
+        transition: opacity 0.2s ease-in-out, background-color 0.2s ease-in-out;
+    }
+    .builder-element .drag-handle:hover {
+        background-color: #f3f4f6 !important;
+        color: #4b5563 !important;
+    }
+    .builder-element .drag-handle:active {
+        cursor: grabbing;
+    }
+    /* Ensure drag handle is always visible when dragging */
+    .builder-element.dragging .drag-handle {
+        opacity: 1 !important;
+    }
     /* For button elements on main canvas, ensure container fits button properly */
     .builder-element[data-type="button"] {
         display: flex !important;
